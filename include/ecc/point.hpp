@@ -10,6 +10,7 @@ using BigInt = boost::multiprecision::cpp_int;
 // Affine point on y^2 = x^3 + ax + b (mod p).
 // This implementation is for learning only: cpp_int and the algorithms used
 // here are variable-time and must not be used with secret scalars.
+// p must be prime; construction applies a Miller-Rabin probable-prime check (up to 32 rounds).
 class Point {
 public:
     Point(BigInt x, BigInt y, BigInt p, BigInt a, BigInt b);
