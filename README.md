@@ -16,9 +16,11 @@ Di atas medan prima `F_p`, titik-titik memenuhi `y² ≡ x³ + ax + b (mod p)`. 
 
 Implementasi `educational::Point` memakai kurva mainan `F_17` pada demo agar perhitungan dapat diikuti. Contoh ini **bukan** parameter yang aman untuk kriptografi.
 
+Konstruktor `Point` mensyaratkan `p > 3` dan menjalankan uji Miller–Rabin *probable prime* (hingga 32 ronde untuk kandidat besar) untuk menolak modulus komposit. Itu bukan bukti matematis; pemanggil tetap harus memasok modulus prima yang diketahui. Invers modular memakai Teorema Kecil Fermat, yang hanya berlaku untuk modulus prima.
+
 ## Build dan jalankan
 
-Prasyarat: C++17 atau lebih baru, OpenSSL 3 beserta header pengembangan (`libssl-dev` pada Debian/Ubuntu), dan `make`.
+Prasyarat: C++17 atau lebih baru, Boost headers, OpenSSL 3 beserta header pengembangan (`libssl-dev` pada Debian/Ubuntu), dan `make`.
 
 ```bash
 make
@@ -35,6 +37,7 @@ Hasil build diletakkan di `build/`. Program demo memperlihatkan `2P`, melakukan 
 - Untuk mengurangi risiko timing side-channel, contoh tidak menjalankan private key atau secret scalar melalui kelas titik edukatif; operasi rahasia memakai API EVP OpenSSL. Jaminan aktual tetap bergantung pada versi, provider, platform, dan konfigurasi OpenSSL—proyek ini tidak mengklaim sertifikasi constant-time.
 - Kombinasi ECDH/HKDF/AES-GCM di sini adalah envelope demonstrasi, bukan protokol standar yang diaudit secara independen. Untuk aplikasi nyata gunakan protokol dan pustaka yang ditinjau pakar; lakukan pengelolaan kunci, rotasi, dan autentikasi identitas dengan benar.
 - API contoh menerima kunci publik dalam format titik SEC1 tak terkompresi yang diekspor OpenSSL. Penyimpanan kunci privat dan format pesan lintas sistem tidak termasuk.
+- Panjang input yang diteruskan ke API OpenSSL bertipe `int` ditolak bila melampaui `INT_MAX`; penjumlahan ukuran buffer juga diperiksa agar tidak overflow.
 
 ## Struktur
 
