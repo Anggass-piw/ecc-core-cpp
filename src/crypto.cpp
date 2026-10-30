@@ -1,4 +1,5 @@
 #include "ecc/crypto.hpp"
+#include "openssl_size.hpp"
 
 #include <openssl/core_names.h>
 #include <openssl/crypto.h>
@@ -114,11 +115,13 @@ Bytes derive_aes_key(const Bytes& shared_secret, const Bytes& salt) {
     PkeyCtxPtr ctx(EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr), EVP_PKEY_CTX_free);
     if (!ctx || EVP_PKEY_derive_init(ctx.get()) <= 0 ||
         EVP_PKEY_CTX_set_hkdf_md(ctx.get(), EVP_sha256()) <= 0 ||
-        EVP_PKEY_CTX_set1_hkdf_salt(ctx.get(), salt.data(), static_cast<int>(salt.size())) <= 0 ||
+        EVP_PKEY_CTX_set1_hkdf_salt(ctx.get(), salt.data(),
+            detail::to_openssl_int_length(salt.size(), "HKDF salt")) <= 0 ||
         EVP_PKEY_CTX_set1_hkdf_key(ctx.get(), shared_secret.data(),
-                                   static_cast<int>(shared_secret.size())) <= 0 ||
+            detail::to_openssl_int_length(shared_secret.size(), "ECDH shared secret")) <= 0 ||
         EVP_PKEY_CTX_add1_hkdf_info(ctx.get(),
-            reinterpret_cast<const unsigned char*>(kHkdfInfo), sizeof(kHkdfInfo) - 1) <= 0) {
+            reinterpret_cast<const unsigned char*>(kHkdfInfo),
+            detail::to_openssl_int_length(sizeof(kHkdfInfo) - 1, "HKDF info")) <= 0) {
         fail("HKDF setup failed");
     }
     Bytes key(kAesKeyBytes);
@@ -134,8 +137,10 @@ void add_aad(EVP_CIPHER_CTX* ctx, const EncryptedMessage& message, bool encrypti
     auto update = [&](const Bytes& bytes) {
         if (!bytes.empty()) {
             const int ok = encrypting
-                ? EVP_EncryptUpdate(ctx, nullptr, &out_length, bytes.data(), static_cast<int>(bytes.size()))
-                : EVP_DecryptUpdate(ctx, nullptr, &out_length, bytes.data(), static_cast<int>(bytes.size()));
+                ? EVP_EncryptUpdate(ctx, nullptr, &out_length, bytes.data(),
+                    detail::to_openssl_int_length(bytes.size(), "AES-GCM AAD"))
+                : EVP_DecryptUpdate(ctx, nullptr, &out_length, bytes.data(),
+                    detail::to_openssl_int_length(bytes.size(), "AES-GCM AAD"));
             if (ok <= 0) fail("AES-GCM AAD processing failed");
         }
     };
@@ -144,29 +149,41 @@ void add_aad(EVP_CIPHER_CTX* ctx, const EncryptedMessage& message, bool encrypti
 }
 
 Bytes aes_gcm_encrypt(const Bytes& key, EncryptedMessage& message, const Bytes& plaintext) {
+    const int nonce_length = detail::to_openssl_int_length(message.nonce.size(), "AES-GCM nonce");
+    const int plaintext_length = detail::to_openssl_int_length(plaintext.size(), "AES-GCM plaintext");
     CipherCtxPtr ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
     if (!ctx || EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) <= 0 ||
         EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN,
-                            static_cast<int>(message.nonce.size()), nullptr) <= 0 ||
+                            nonce_length, nullptr) <= 0 ||
         EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), message.nonce.data()) <= 0) {
         fail("AES-GCM encryption init failed");
     }
     add_aad(ctx.get(), message, true);
 
-    Bytes ciphertext(plaintext.size() + 16);
+    Bytes ciphertext(detail::checked_add_size(plaintext.size(), 16,
+                                               "AES-GCM ciphertext buffer"));
     int produced = 0;
     if (!plaintext.empty() && EVP_EncryptUpdate(ctx.get(), ciphertext.data(), &produced,
-                                                plaintext.data(), static_cast<int>(plaintext.size())) <= 0) {
+                                                plaintext.data(), plaintext_length) <= 0) {
         fail("AES-GCM encryption failed");
+    }
+    if (produced < 0 || static_cast<std::size_t>(produced) > ciphertext.size()) {
+        fail("AES-GCM returned an invalid update length");
     }
     int final_bytes = 0;
     if (EVP_EncryptFinal_ex(ctx.get(), ciphertext.data() + produced, &final_bytes) <= 0) {
         fail("AES-GCM finalization failed");
     }
-    ciphertext.resize(static_cast<std::size_t>(produced + final_bytes));
+    if (produced < 0 || final_bytes < 0) fail("AES-GCM returned an invalid output length");
+    const std::size_t ciphertext_length = detail::checked_add_size(
+        static_cast<std::size_t>(produced), static_cast<std::size_t>(final_bytes),
+        "AES-GCM ciphertext output");
+    if (ciphertext_length > ciphertext.size()) fail("AES-GCM returned an oversized output");
+    ciphertext.resize(ciphertext_length);
     message.tag.resize(kTagBytes);
     if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG,
-                            static_cast<int>(message.tag.size()), message.tag.data()) <= 0) {
+            detail::to_openssl_int_length(message.tag.size(), "AES-GCM tag"),
+            message.tag.data()) <= 0) {
         fail("AES-GCM tag retrieval failed");
     }
     return ciphertext;
@@ -177,24 +194,31 @@ Bytes aes_gcm_decrypt(const Bytes& key, const EncryptedMessage& message) {
         message.hkdf_salt.size() != kSaltBytes) {
         throw std::invalid_argument("invalid encrypted message parameters");
     }
+    const int nonce_length = detail::to_openssl_int_length(message.nonce.size(), "AES-GCM nonce");
+    const int ciphertext_input_length = detail::to_openssl_int_length(
+        message.ciphertext.size(), "AES-GCM ciphertext");
     CipherCtxPtr ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
     if (!ctx || EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) <= 0 ||
         EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN,
-                            static_cast<int>(message.nonce.size()), nullptr) <= 0 ||
+                            nonce_length, nullptr) <= 0 ||
         EVP_DecryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), message.nonce.data()) <= 0) {
         fail("AES-GCM decryption init failed");
     }
     add_aad(ctx.get(), message, false);
 
-    Bytes plaintext(message.ciphertext.size() + 16);
+    Bytes plaintext(detail::checked_add_size(message.ciphertext.size(), 16,
+                                              "AES-GCM plaintext buffer"));
     int produced = 0;
     if (!message.ciphertext.empty() && EVP_DecryptUpdate(ctx.get(), plaintext.data(), &produced,
-                    message.ciphertext.data(), static_cast<int>(message.ciphertext.size())) <= 0) {
+                    message.ciphertext.data(), ciphertext_input_length) <= 0) {
         fail("AES-GCM decryption failed");
+    }
+    if (produced < 0 || static_cast<std::size_t>(produced) > plaintext.size()) {
+        fail("AES-GCM returned an invalid update length");
     }
     Bytes tag = message.tag;
     if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG,
-                            static_cast<int>(tag.size()), tag.data()) <= 0) {
+            detail::to_openssl_int_length(tag.size(), "AES-GCM tag"), tag.data()) <= 0) {
         fail("AES-GCM tag setup failed");
     }
     int final_bytes = 0;
@@ -202,7 +226,12 @@ Bytes aes_gcm_decrypt(const Bytes& key, const EncryptedMessage& message) {
         OPENSSL_cleanse(plaintext.data(), plaintext.size());
         throw std::runtime_error("AES-GCM authentication failed: message was altered or key is wrong");
     }
-    plaintext.resize(static_cast<std::size_t>(produced + final_bytes));
+    if (produced < 0 || final_bytes < 0) fail("AES-GCM returned an invalid output length");
+    const std::size_t plaintext_length = detail::checked_add_size(
+        static_cast<std::size_t>(produced), static_cast<std::size_t>(final_bytes),
+        "AES-GCM plaintext output");
+    if (plaintext_length > plaintext.size()) fail("AES-GCM returned an oversized output");
+    plaintext.resize(plaintext_length);
     return plaintext;
 }
 
@@ -261,8 +290,10 @@ EncryptedMessage encrypt_for(const Bytes& recipient_public_key, const Bytes& pla
     message.ephemeral_public_key = export_public_key(ephemeral.get());
     message.hkdf_salt.resize(kSaltBytes);
     message.nonce.resize(kNonceBytes);
-    if (RAND_bytes(message.hkdf_salt.data(), static_cast<int>(message.hkdf_salt.size())) != 1 ||
-        RAND_bytes(message.nonce.data(), static_cast<int>(message.nonce.size())) != 1) {
+    if (RAND_bytes(message.hkdf_salt.data(), detail::to_openssl_int_length(
+                    message.hkdf_salt.size(), "HKDF salt")) != 1 ||
+        RAND_bytes(message.nonce.data(), detail::to_openssl_int_length(
+                    message.nonce.size(), "AES-GCM nonce")) != 1) {
         fail("secure random generation failed");
     }
     const Bytes key = derive_aes_key(secret, message.hkdf_salt);

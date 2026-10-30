@@ -1,15 +1,37 @@
 #include "ecc/point.hpp"
 
+#include <boost/multiprecision/miller_rabin.hpp>
+
+#include <random>
 #include <stdexcept>
 #include <utility>
 
 namespace ecc::educational {
+namespace {
+
+bool is_probable_prime(const BigInt& candidate) {
+    if (candidate < 2) return false;
+    if (candidate <= 227) {
+        return boost::multiprecision::miller_rabin_test(candidate, 0);
+    }
+
+    std::random_device source;
+    std::seed_seq seed{source(), source(), source(), source(),
+                       source(), source(), source(), source()};
+    std::mt19937_64 generator(seed);
+    return boost::multiprecision::miller_rabin_test(candidate, 32, generator);
+}
+
+} // namespace
 
 Point::Point(BigInt x, BigInt y, BigInt p, BigInt a, BigInt b)
     : Point(std::move(x), std::move(y), std::move(p), std::move(a),
             std::move(b), false) {
     if (p_ <= 3) {
         throw std::invalid_argument("field modulus p must be greater than 3");
+    }
+    if (!is_probable_prime(p_)) {
+        throw std::invalid_argument("field modulus p must be prime");
     }
     x_ = mod(x_, p_);
     y_ = mod(y_, p_);
@@ -30,6 +52,12 @@ Point Point::infinity(BigInt p, BigInt a, BigInt b) {
     if (p <= 3) {
         throw std::invalid_argument("field modulus p must be greater than 3");
     }
+    if (!is_probable_prime(p)) {
+        throw std::invalid_argument("field modulus p must be prime");
+    }
+    if (mod(4 * a * a * a + 27 * b * b, p) == 0) {
+        throw std::invalid_argument("curve must be nonsingular over the field");
+    }
     return Point(0, 0, std::move(p), std::move(a), std::move(b), true);
 }
 
@@ -48,7 +76,11 @@ BigInt Point::inverse(const BigInt& value, const BigInt& modulus) {
     if (normalized == 0) {
         throw std::domain_error("zero has no inverse in the field");
     }
-    return boost::multiprecision::powm(normalized, modulus - 2, modulus);
+    const BigInt result = boost::multiprecision::powm(normalized, modulus - 2, modulus);
+    if (mod(normalized * result, modulus) != 1) {
+        throw std::domain_error("modular inverse failed; modulus may not be prime");
+    }
+    return result;
 }
 
 bool Point::is_on_curve() const {
@@ -71,11 +103,11 @@ Point Point::operator+(const Point& rhs) const {
 
     BigInt slope;
     if (x_ == rhs.x_ && mod(y_ + rhs.y_, p_) == 0) {
-        return infinity(p_, a_, b_);
+        return Point(0, 0, p_, a_, b_, true);
     }
 
     if (x_ == rhs.x_ && y_ == rhs.y_) {
-        if (mod(2 * y_, p_) == 0) return infinity(p_, a_, b_);
+        if (mod(2 * y_, p_) == 0) return Point(0, 0, p_, a_, b_, true);
         slope = mod((3 * x_ * x_ + a_) * inverse(2 * y_, p_), p_);
     } else {
         slope = mod((rhs.y_ - y_) * inverse(rhs.x_ - x_, p_), p_);
@@ -83,16 +115,16 @@ Point Point::operator+(const Point& rhs) const {
 
     const BigInt x3 = mod(slope * slope - x_ - rhs.x_, p_);
     const BigInt y3 = mod(slope * (x_ - x3) - y_, p_);
-    return Point(x3, y3, p_, a_, b_);
+    return Point(x3, y3, p_, a_, b_, false);
 }
 
 Point Point::operator-() const {
     if (infinity_) return *this;
-    return Point(x_, mod(-y_, p_), p_, a_, b_);
+    return Point(x_, mod(-y_, p_), p_, a_, b_, false);
 }
 
 Point Point::operator*(BigInt scalar) const {
-    if (scalar == 0 || infinity_) return infinity(p_, a_, b_);
+    if (scalar == 0 || infinity_) return Point(0, 0, p_, a_, b_, true);
     if (scalar < 0) return (-*this) * (-scalar);
 
     // Straightforward double-and-add for clarity, not constant-time.
